@@ -2,11 +2,13 @@
 
 在一台 Linux VPS 上交互式部署以下三个入口：
 
-- Hysteria 2：固定 UDP 端口，ACME 自动证书，应用层使用标准 BBR，出站 `mode: 46`（IPv4 优先、IPv6 回退）
+- Hysteria 2：可配置 UDP 端口，ACME 自动证书，应用层使用标准 BBR，出站 `mode: 46`（IPv4 优先、IPv6 回退）
 - VLESS + REALITY + XTLS Vision：支持外部目标与“偷自己”内部 TLS 站点，Freedom 出站 `UseIPv4v6`
 - Snell v5 + ShadowTLS v3：Snell 仅监听内部 IPv4，出站设置 `ipv6=false`，由 ShadowTLS 对外提供 TCP 入口
 
 脚本会安装依赖与 Docker Compose、下载官方 Snell Server、生成全部凭据、切换 `BBR + fq`、配置已启用的 UFW/firewalld，并输出客户端配置。凭据和运行数据不会进入 Git。
+
+三个代理入口的公网端口均可交互修改。首次部署直接回车时，会为每个入口生成一个互不重复的 `10000–65535` 随机高端口；二次运行直接回车则保留现有端口。
 
 Hysteria、Xray-core、ShadowTLS、Nginx 和 Snell 容器的 Debian 基础镜像均默认使用 `latest`；需要稳定复现时，也可以在交互过程中输入明确标签。Snell Server 是官方二进制下载，默认版本为 `v5.0.1`。
 
@@ -25,9 +27,9 @@ Hysteria、Xray-core、ShadowTLS、Nginx 和 Snell 容器的 Debian 基础镜像
 2. 将域名的 **A 记录直接指向 VPS IPv4**。不要开启 CDN 代理。Reality 使用“偷自己”时，可以复用这个域名；如果使用另一个域名，它也必须有直连本机的 A 记录。
 3. 云厂商安全组至少放行：
    - `80/tcp`：Hysteria ACME HTTP-01 申请和续期证书
-   - `443/tcp`：VLESS Reality 默认端口
-   - `32123/udp`：Hysteria 2 默认端口
-   - `32413/tcp`：Snell + ShadowTLS 默认端口
+   - `<交互选择>/tcp`：VLESS Reality 对外端口
+   - `<交互选择>/udp`：Hysteria 2 对外端口
+   - `<交互选择>/tcp`：Snell + ShadowTLS 对外端口
 4. 确保 TCP 80 没有被 Nginx、Caddy 等服务占用。
 
 ## 一键部署
@@ -66,7 +68,7 @@ sudo ./install.sh
 ./manage.sh start
 ```
 
-重新运行 `sudo ./install.sh` 可以修改参数。默认保留现有凭据；选择重新生成时会轮换全部客户端凭据。旧配置会备份到 `backups/<时间戳>/`。
+重新运行 `sudo ./install.sh` 可以修改参数，包括三个代理入口的对外端口。脚本会允许当前项目复用原端口，并检查新端口是否被其他程序占用；修改后会同步更新 Compose 映射、防火墙规则和客户端配置。默认保留现有凭据；选择重新生成时会轮换全部客户端凭据。旧配置会备份到 `backups/<时间戳>/`。
 
 ## Reality 偷自己模式
 

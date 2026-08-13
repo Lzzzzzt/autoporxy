@@ -101,6 +101,28 @@ validate_port() {
   [[ "$value" =~ ^[1-9][0-9]*$ ]] && (( 10#$value <= 65535 ))
 }
 
+random_high_port() {
+  local random_hex candidate excluded conflict
+  while true; do
+    random_hex=$(openssl rand -hex 4)
+    candidate=$((10000 + (16#$random_hex % 55536)))
+    conflict=false
+    for excluded in "$@"; do
+      if [[ -n "$excluded" && "$candidate" == "$excluded" ]]; then
+        conflict=true
+        break
+      fi
+    done
+    [[ "$conflict" == "false" ]] || continue
+    if command -v ss >/dev/null 2>&1 \
+      && { port_listening tcp "$candidate" || port_listening udp "$candidate"; }; then
+      continue
+    fi
+    printf '%s' "$candidate"
+    return 0
+  done
+}
+
 validate_bool() { [[ "$1" == "true" || "$1" == "false" ]]; }
 validate_nonnegative_integer() { [[ "$1" =~ ^[0-9]+$ ]]; }
 validate_node_name() { [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$ ]]; }
@@ -297,7 +319,7 @@ detect_public_ipv4() {
 }
 
 collect_settings() {
-  local detected_ip old_value
+  local detected_ip old_value default_hy2_port default_xray_port default_snell_port
   detected_ip=$(detect_public_ipv4)
 
   printf '\n%s\n' '--- 节点与镜像配置 ---'
@@ -328,14 +350,19 @@ collect_settings() {
   ask_until_valid ACME_EMAIL "Let's Encrypt 邮箱（可留空）" "${old_value:-}" validate_email
 
   old_value=$(env_get HY2_PORT)
-  ask_until_valid HY2_PORT "Hysteria 2 UDP 端口" "${old_value:-32123}" validate_port
+  default_hy2_port=${old_value:-$(random_high_port)}
+  ask_until_valid HY2_PORT "Hysteria 2 对外监听 UDP 端口（首次部署默认随机）" "$default_hy2_port" validate_port
   old_value=$(env_get XRAY_PORT)
-  ask_until_valid XRAY_PORT "VLESS Reality TCP 端口" "${old_value:-443}" validate_port
+  default_xray_port=${old_value:-$(random_high_port "$HY2_PORT")}
+  ask_until_valid XRAY_PORT "VLESS Reality 对外监听 TCP 端口（首次部署默认随机）" "$default_xray_port" validate_port
   old_value=$(env_get SNELL_PORT)
-  ask_until_valid SNELL_PORT "Snell + ShadowTLS TCP 端口" "${old_value:-32413}" validate_port
+  default_snell_port=${old_value:-$(random_high_port "$HY2_PORT" "$XRAY_PORT")}
+  ask_until_valid SNELL_PORT "Snell + ShadowTLS 对外监听 TCP 端口（首次部署默认随机）" "$default_snell_port" validate_port
 
   (( XRAY_PORT != SNELL_PORT )) || die "Reality 与 Snell 都使用 TCP，端口不能相同。"
   (( XRAY_PORT != 80 && SNELL_PORT != 80 )) || die "TCP 80 保留给 Hysteria ACME HTTP-01。"
+  printf '已选择对外端口：HY2 %s/udp，Reality %s/tcp，Snell/ShadowTLS %s/tcp\n' \
+    "$HY2_PORT" "$XRAY_PORT" "$SNELL_PORT"
 
   printf '\n%s\n' '--- Hysteria 2 高级配置 ---'
   old_value=$(env_get HY2_MASQUERADE_URL)
@@ -478,14 +505,31 @@ port_listening() {
   fi
 }
 
+compose_owns_host_port() {
+  local service=$1 container_port=$2 protocol=$3 host_port=$4 bindings
+  [[ -f "$ENV_FILE" ]] || return 1
+  command -v docker >/dev/null 2>&1 || return 1
+  bindings=$(docker compose --project-directory "$SCRIPT_DIR" port \
+    --protocol "$protocol" "$service" "$container_port" 2>/dev/null || true)
+  [[ -n "$bindings" ]] || return 1
+  printf '%s\n' "$bindings" \
+    | awk -v port="$host_port" '$0 ~ (":" port "$") { found=1 } END { exit !found }'
+}
+
 preflight_ports() {
-  [[ -f "$ENV_FILE" ]] && return 0
-  local item protocol port
-  for item in "tcp:80" "tcp:${XRAY_PORT}" "tcp:${SNELL_PORT}" "udp:${HY2_PORT}"; do
-    protocol=${item%%:*}
-    port=${item##*:}
+  local item protocol port service container_port
+  for item in \
+    "tcp|80|hysteria|80" \
+    "tcp|${XRAY_PORT}|xray|443" \
+    "tcp|${SNELL_PORT}|shadow-tls|32413" \
+    "udp|${HY2_PORT}|hysteria|32123"; do
+    IFS='|' read -r protocol port service container_port <<< "$item"
     if port_listening "$protocol" "$port"; then
-      die "${protocol^^} ${port} 已被占用。请释放端口或重新运行后选择其他端口。"
+      if compose_owns_host_port "$service" "$container_port" "$protocol" "$port"; then
+        log "${protocol^^} ${port} 当前由本项目 ${service} 使用，部署时将复用。"
+      else
+        die "${protocol^^} ${port} 已被其他程序占用。请释放端口或重新运行后选择其他端口。"
+      fi
     fi
   done
 }
@@ -875,6 +919,8 @@ deploy() {
 
 print_summary() {
   printf '\n%s\n' '================ 部署完成 ================'
+  printf '对外监听端口：HY2 %s/udp，Reality %s/tcp，Snell/ShadowTLS %s/tcp\n\n' \
+    "$HY2_PORT" "$XRAY_PORT" "$SNELL_PORT"
   cat "$CLIENT_FILE"
   printf '\n客户端配置已保存到：%s\n' "$CLIENT_FILE"
   printf '查看状态：cd %s && ./manage.sh status\n' "$SCRIPT_DIR"
