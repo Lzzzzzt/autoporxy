@@ -68,7 +68,10 @@ case "${1:-}" in
   check)
     docker compose config --quiet
     docker run --rm -v "${SCRIPT_DIR}/data/xray/config.json:/etc/xray/config.json:ro" "$(env_get XRAY_IMAGE)" run -test -config /etc/xray/config.json
-    printf 'Compose 与 Xray 配置校验通过。\n'
+    if [[ "$(env_get REALITY_MODE)" == "self" ]]; then
+      docker compose run --rm --no-deps --entrypoint nginx reality-web -t
+    fi
+    printf 'Compose、Xray 与启用的内部站点配置校验通过。\n'
     ;;
   -h|--help|help|'') usage ;;
   *) printf '未知命令：%s\n\n' "$1" >&2; usage >&2; exit 2 ;;

@@ -3,12 +3,12 @@
 在一台 Linux VPS 上交互式部署以下三个入口：
 
 - Hysteria 2：固定 UDP 端口，ACME 自动证书，应用层使用标准 BBR，出站 `mode: 46`（IPv4 优先、IPv6 回退）
-- VLESS + REALITY + XTLS Vision：TCP 入口，Freedom 出站 `UseIPv4v6`
+- VLESS + REALITY + XTLS Vision：支持外部目标与“偷自己”内部 TLS 站点，Freedom 出站 `UseIPv4v6`
 - Snell v5 + ShadowTLS v3：Snell 仅监听内部 IPv4，出站设置 `ipv6=false`，由 ShadowTLS 对外提供 TCP 入口
 
 脚本会安装依赖与 Docker Compose、下载官方 Snell Server、生成全部凭据、切换 `BBR + fq`、配置已启用的 UFW/firewalld，并输出客户端配置。凭据和运行数据不会进入 Git。
 
-Hysteria、Xray-core、ShadowTLS 和 Snell 容器的 Debian 基础镜像均默认使用 `latest`；需要稳定复现时，也可以在交互过程中输入明确标签。Snell Server 是官方二进制下载，默认版本为 `v5.0.1`。
+Hysteria、Xray-core、ShadowTLS、Nginx 和 Snell 容器的 Debian 基础镜像均默认使用 `latest`；需要稳定复现时，也可以在交互过程中输入明确标签。Snell Server 是官方二进制下载，默认版本为 `v5.0.1`。
 
 ## 支持环境
 
@@ -22,7 +22,7 @@ Hysteria、Xray-core、ShadowTLS 和 Snell 容器的 Debian 基础镜像均默�
 ## 部署前准备
 
 1. 为 Hysteria 2 准备一个域名，例如 `hy2.example.com`。
-2. 将域名的 **A 记录直接指向 VPS IPv4**。不要开启 CDN 代理。
+2. 将域名的 **A 记录直接指向 VPS IPv4**。不要开启 CDN 代理。Reality 使用“偷自己”时，可以复用这个域名；如果使用另一个域名，它也必须有直连本机的 A 记录。
 3. 云厂商安全组至少放行：
    - `80/tcp`：Hysteria ACME HTTP-01 申请和续期证书
    - `443/tcp`：VLESS Reality 默认端口
@@ -40,11 +40,11 @@ sudo ./install.sh
 
 脚本会依次询问：
 
-- 节点名称、四个容器镜像与 Snell Server 版本
+- 节点名称、容器镜像与 Snell Server 版本
 - 客户端连接地址、Hysteria 2 域名与 Let's Encrypt 邮箱
 - Hysteria、Reality、Snell/ShadowTLS 三个对外端口
 - Hysteria 的伪装地址、地址族策略、Fast Open、拥塞算法、测速与 UDP 超时
-- Reality 的伪装目标、目标端口、时间差、TLS 指纹、地址策略与日志级别
+- Reality 的 `remote/self` 模式、SNI、目标端口、时间差、TLS 指纹、地址策略与日志级别
 - ShadowTLS 的握手目标、strict、Fast Open、日志级别
 - Snell 的 IPv6、TFO、DNS，以及 Surge 客户端的复用和 TFO
 - 是否启用 BBR + fq
@@ -58,6 +58,7 @@ sudo ./install.sh
 ./manage.sh status
 ./manage.sh logs
 ./manage.sh logs hysteria
+./manage.sh logs reality-web
 ./manage.sh show
 ./manage.sh check
 ./manage.sh restart
@@ -66,6 +67,24 @@ sudo ./install.sh
 ```
 
 重新运行 `sudo ./install.sh` 可以修改参数。默认保留现有凭据；选择重新生成时会轮换全部客户端凭据。旧配置会备份到 `backups/<时间戳>/`。
+
+## Reality 偷自己模式
+
+安装器在 Reality 配置阶段提供两种模式：
+
+- `remote`：Xray 连接外部 TLS 目标。SNI 与目标地址可以分别设置，适合选择同 ASN、低延迟且支持 TLS 1.3 的站点。
+- `self`：自动启用 Compose 内部的 `reality-web` Nginx。Xray 对外监听 Reality 端口，但鉴权失败的连接回落到内网 Nginx，不会通过公网 443 回连自身。
+
+`self` 模式下，偷自己域名必须直接解析到 VPS。默认复用 HY2 域名，也可以输入另一个直连域名；Hysteria 的 ACME 会为所有需要的域名签发证书。Nginx 只监听 Compose 内网，不新增公网端口，并以只读方式挂载 ACME 证书。证书续期发生变化后，内部监控脚本会自动检查并 reload Nginx。
+
+首次签发可能需要几十秒，安装器最多等待 120 秒。内部关系如下：
+
+```text
+客户端 -> VPS Reality TCP 端口 -> Xray -> reality-web:8443
+                                      (自己的域名与有效证书)
+```
+
+从 `self` 切回 `remote` 后重新运行安装器即可；部署命令会停止不再启用的内部站点。
 
 ## 版本更新
 
@@ -99,6 +118,7 @@ docker compose logs --tail=200
 
 - Hysteria 日志出现 ACME 失败：检查域名 A 记录、TCP 80、安全组和本机防火墙。
 - Reality 无法连接：确认 TCP 端口放行，客户端 URI 中 `pbk`、`sid`、`sni` 未被改动。
+- Reality 偷自己站点未就绪：确认偷自己域名直连本机、TCP 80 可达，并查看 `hysteria` 与 `reality-web` 日志。
 - ShadowTLS 启动报 io_uring/memlock 错误：先查看日志；极小内存或受限虚拟化环境可能不支持所需能力。
 - BBR 不可用：升级 VPS 内核，或确认服务商没有禁用拥塞控制模块。
 

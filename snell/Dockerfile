@@ -1,4 +1,4 @@
-ARG DEBIAN_IMAGE=debian:bookworm-slim
+ARG DEBIAN_IMAGE=debian:latest
 FROM ${DEBIAN_IMAGE}
 
 COPY --chown=root:root snell-server /usr/local/bin/snell-server

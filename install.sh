@@ -10,6 +10,7 @@ CLIENT_FILE="${SCRIPT_DIR}/client-config.txt"
 SYSCTL_FILE="/etc/sysctl.d/99-proxy-stack.conf"
 MODULES_FILE="/etc/modules-load.d/proxy-stack.conf"
 TEMP_DIR=""
+REALITY_TARGET_PORT=""
 
 if [[ -t 1 ]]; then
   RED=$'\033[0;31m'
@@ -113,6 +114,7 @@ validate_congestion() { [[ "$1" == "bbr" || "$1" == "reno" ]]; }
 validate_bbr_profile() { [[ "$1" =~ ^(standard|conservative|aggressive)$ ]]; }
 validate_duration() { [[ "$1" =~ ^[1-9][0-9]*(ms|s|m|h)$ ]]; }
 validate_fingerprint() { [[ "$1" =~ ^[A-Za-z0-9._-]+$ ]]; }
+validate_reality_mode() { [[ "$1" == "remote" || "$1" == "self" ]]; }
 validate_xray_log_level() { [[ "$1" =~ ^(debug|info|warning|error|none)$ ]]; }
 validate_shadow_log_level() { [[ "$1" =~ ^(trace|debug|info|warn|error|off)$ ]]; }
 validate_domain_strategy() {
@@ -313,6 +315,8 @@ collect_settings() {
   old_value=$(env_get SNELL_VERSION)
   ask_until_valid SNELL_VERSION "Snell Server 版本 (4.x/5.x)" "${old_value:-5.0.1}" validate_snell_version
   SNELL_CLIENT_VERSION=${SNELL_VERSION%%.*}
+  NGINX_IMAGE=$(env_get NGINX_IMAGE)
+  NGINX_IMAGE=${NGINX_IMAGE:-nginx:latest}
 
   printf '\n%s\n' '--- 地址、证书与端口 ---'
   old_value=$(env_get SERVER_ADDRESS)
@@ -350,11 +354,40 @@ collect_settings() {
   ask_until_valid HY2_UDP_IDLE_TIMEOUT "HY2 UDP 空闲超时" "${old_value:-60s}" validate_duration
 
   printf '\n%s\n' '--- VLESS Reality 高级配置 ---'
-  old_value=$(env_get REALITY_SNI)
-  ask_until_valid REALITY_SNI "Reality 伪装域名" "${old_value:-www.apple.com}" validate_domain
+  local old_reality_mode old_reality_sni default_reality_sni default_reality_port
+  old_reality_mode=$(env_get REALITY_MODE)
+  ask_until_valid REALITY_MODE "Reality 模式 (remote=外部目标/self=偷自己)" "${old_reality_mode:-remote}" validate_reality_mode
+  old_reality_sni=$(env_get REALITY_SNI)
+  if [[ "$REALITY_MODE" == "self" ]]; then
+    if [[ "$old_reality_mode" == "self" && -n "$old_reality_sni" ]]; then
+      default_reality_sni=$old_reality_sni
+    else
+      default_reality_sni=$HY2_DOMAIN
+    fi
+    ask_until_valid REALITY_SNI "偷自己域名（A 记录必须直连本机）" "$default_reality_sni" validate_domain
+    old_value=$(env_get NGINX_IMAGE)
+    ask_until_valid NGINX_IMAGE "Reality 内部 Nginx 镜像" "${old_value:-nginx:latest}" validate_image
+    REALITY_TARGET_HOST=reality-web
+    COMPOSE_PROFILES=self
+    if [[ "$old_reality_mode" == "self" ]]; then
+      default_reality_port=$(env_get REALITY_TARGET_PORT)
+    else
+      default_reality_port=8443
+    fi
+  else
+    ask_until_valid REALITY_SNI "Reality 伪装 SNI 域名" "${old_reality_sni:-www.apple.com}" validate_domain
+    old_value=$(env_get REALITY_TARGET_HOST)
+    ask_until_valid REALITY_TARGET_HOST "Reality 外部目标地址（域名或 IP）" "${old_value:-$REALITY_SNI}" validate_endpoint
+    COMPOSE_PROFILES=""
+    if [[ -z "$old_reality_mode" || "$old_reality_mode" == "remote" ]]; then
+      default_reality_port=$(env_get REALITY_TARGET_PORT)
+    else
+      default_reality_port=443
+    fi
+  fi
   REALITY_SNI=${REALITY_SNI,,}
-  old_value=$(env_get REALITY_TARGET_PORT)
-  ask_until_valid REALITY_TARGET_PORT "Reality 目标 TCP 端口" "${old_value:-443}" validate_port
+  REALITY_TARGET_HOST=${REALITY_TARGET_HOST,,}
+  ask_until_valid REALITY_TARGET_PORT "Reality 目标 TCP 端口" "${default_reality_port:-443}" validate_port
   old_value=$(env_get REALITY_SHOW)
   ask_until_valid REALITY_SHOW "Reality 调试输出 (true/false)" "${old_value:-false}" validate_bool
   old_value=$(env_get REALITY_MAX_TIME_DIFF)
@@ -389,6 +422,10 @@ collect_settings() {
   old_value=$(env_get SNELL_CLIENT_TFO)
   ask_until_valid SNELL_CLIENT_TFO "Surge Snell TCP Fast Open (true/false)" "${old_value:-true}" validate_bool
 
+  if [[ "$REALITY_MODE" == "self" && "$SHADOWTLS_SNI" == "$REALITY_SNI" && "$SHADOWTLS_TARGET_PORT" == "$XRAY_PORT" ]]; then
+    die "ShadowTLS 握手目标不能指向本机 Reality 入口，否则会形成回连循环。"
+  fi
+
   SHADOWTLS_STRICT_ENV=""
   SHADOWTLS_FAST_OPEN_ENV=""
   if [[ "$SHADOWTLS_STRICT" == "true" ]]; then SHADOWTLS_STRICT_ENV=1; fi
@@ -396,25 +433,36 @@ collect_settings() {
 }
 
 check_dns() {
-  local detected_ip resolved
+  local detected_ip resolved domain label index
+  local -a domains labels
   detected_ip=$(detect_public_ipv4)
-  resolved=$(getent ahostsv4 "$HY2_DOMAIN" 2>/dev/null | awk '{print $1}' | sort -u | paste -sd, - || true)
-  if [[ -z "$resolved" ]]; then
-    warn "${HY2_DOMAIN} 暂时没有可解析的 A 记录；ACME 与 HY2 启动会失败。"
-    prompt_yes_no "仍然继续？" n || die "请先配置 DNS A 记录。"
-  elif [[ -n "$detected_ip" && ",${resolved}," != *",${detected_ip},"* ]]; then
-    warn "${HY2_DOMAIN} 解析为 ${resolved}，但本机公网 IPv4 是 ${detected_ip}。"
-    prompt_yes_no "确认 DNS/转发配置正确并继续？" n || die "请修正 DNS 后重试。"
-  else
-    ok "DNS A 记录：${HY2_DOMAIN} -> ${resolved}"
+  domains=("$HY2_DOMAIN")
+  labels=("Hysteria")
+  if [[ "$REALITY_MODE" == "self" && "$REALITY_SNI" != "$HY2_DOMAIN" ]]; then
+    domains+=("$REALITY_SNI")
+    labels+=("Reality 偷自己")
   fi
+  for index in "${!domains[@]}"; do
+    domain=${domains[$index]}
+    label=${labels[$index]}
+    resolved=$(getent ahostsv4 "$domain" 2>/dev/null | awk '{print $1}' | sort -u | paste -sd, - || true)
+    if [[ -z "$resolved" ]]; then
+      warn "${label} 域名 ${domain} 暂时没有可解析的 A 记录；ACME 签发会失败。"
+      prompt_yes_no "仍然继续？" n || die "请先配置 DNS A 记录。"
+    elif [[ -n "$detected_ip" && ",${resolved}," != *",${detected_ip},"* ]]; then
+      warn "${label} 域名 ${domain} 解析为 ${resolved}，但本机公网 IPv4 是 ${detected_ip}。"
+      prompt_yes_no "确认 DNS/转发配置正确并继续？" n || die "请修正 DNS 后重试。"
+    else
+      ok "${label} DNS A 记录：${domain} -> ${resolved}"
+    fi
+  done
 }
 
 check_tls13_target() {
-  local target=$1 label=$2 port=$3 tls_output
-  tls_output=$(timeout 10 openssl s_client -connect "${target}:${port}" -servername "$target" -tls1_3 </dev/null 2>/dev/null || true)
+  local target=$1 server_name=$2 label=$3 port=$4 tls_output
+  tls_output=$(timeout 10 openssl s_client -connect "${target}:${port}" -servername "$server_name" -tls1_3 </dev/null 2>/dev/null || true)
   if [[ "$tls_output" == *'TLSv1.3'* ]]; then
-    ok "${label} 支持 TLS 1.3：${target}:${port}"
+    ok "${label} 支持 TLS 1.3：${target}:${port} (SNI ${server_name})"
   else
     warn "无法确认 ${target}:${port} 支持 TLS 1.3；${label} 可能无法正常工作。"
     prompt_yes_no "仍使用 ${target}:${port}？" n || die "请重新运行并选择支持 TLS 1.3 的目标。"
@@ -514,10 +562,12 @@ download_snell() {
 
 write_env() {
   {
+    printf 'COMPOSE_PROFILES=%s\n' "$COMPOSE_PROFILES"
     printf 'NODE_NAME=%s\n' "$NODE_NAME"
     printf 'HYSTERIA_IMAGE=%s\n' "$HYSTERIA_IMAGE"
     printf 'XRAY_IMAGE=%s\n' "$XRAY_IMAGE"
     printf 'SHADOWTLS_IMAGE=%s\n' "$SHADOWTLS_IMAGE"
+    printf 'NGINX_IMAGE=%s\n' "$NGINX_IMAGE"
     printf 'DEBIAN_IMAGE=%s\n' "$DEBIAN_IMAGE"
     printf 'SNELL_VERSION=%s\n' "$SNELL_VERSION"
     printf 'SNELL_CLIENT_VERSION=%s\n' "$SNELL_CLIENT_VERSION"
@@ -534,7 +584,9 @@ write_env() {
     printf 'HY2_BBR_PROFILE=%s\n' "$HY2_BBR_PROFILE"
     printf 'HY2_SPEED_TEST=%s\n' "$HY2_SPEED_TEST"
     printf 'HY2_UDP_IDLE_TIMEOUT=%s\n' "$HY2_UDP_IDLE_TIMEOUT"
+    printf 'REALITY_MODE=%s\n' "$REALITY_MODE"
     printf 'REALITY_SNI=%s\n' "$REALITY_SNI"
+    printf 'REALITY_TARGET_HOST=%s\n' "$REALITY_TARGET_HOST"
     printf 'REALITY_TARGET_PORT=%s\n' "$REALITY_TARGET_PORT"
     printf 'REALITY_SHOW=%s\n' "$REALITY_SHOW"
     printf 'REALITY_MAX_TIME_DIFF=%s\n' "$REALITY_MAX_TIME_DIFF"
@@ -566,6 +618,9 @@ write_env() {
 
 write_service_configs() {
   install -d -m 0700 "${DATA_DIR}/snell" "${DATA_DIR}/hysteria/acme" "${DATA_DIR}/xray"
+  if [[ "$REALITY_MODE" == "self" ]]; then
+    install -d -m 0700 "${DATA_DIR}/reality/www"
+  fi
 
   cat > "${DATA_DIR}/snell/snell-server.conf" <<EOF
 [snell-server]
@@ -585,6 +640,9 @@ acme:
   domains:
     - ${HY2_DOMAIN}
 EOF
+  if [[ "$REALITY_MODE" == "self" && "$REALITY_SNI" != "$HY2_DOMAIN" ]]; then
+    printf '    - %s\n' "$REALITY_SNI" >> "${DATA_DIR}/hysteria/config.yaml"
+  fi
   if [[ -n "$ACME_EMAIL" ]]; then
     printf '  email: %s\n' "$ACME_EMAIL" >> "${DATA_DIR}/hysteria/config.yaml"
   fi
@@ -625,6 +683,51 @@ masquerade:
     rewriteHost: true
 EOF
 
+  if [[ "$REALITY_MODE" == "self" ]]; then
+    cat > "${DATA_DIR}/reality/nginx.conf" <<EOF
+user nginx;
+worker_processes auto;
+pid /var/run/nginx.pid;
+
+events {
+  worker_connections 1024;
+}
+
+http {
+  include /etc/nginx/mime.types;
+  default_type application/octet-stream;
+  access_log /dev/stdout;
+  error_log /dev/stderr warn;
+  server_tokens off;
+
+  server {
+    listen ${REALITY_TARGET_PORT} ssl;
+    http2 on;
+    server_name ${REALITY_SNI};
+
+    ssl_certificate /var/lib/hysteria/acme/certificates/acme-v02.api.letsencrypt.org-directory/${REALITY_SNI}/${REALITY_SNI}.crt;
+    ssl_certificate_key /var/lib/hysteria/acme/certificates/acme-v02.api.letsencrypt.org-directory/${REALITY_SNI}/${REALITY_SNI}.key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 1h;
+
+    root /usr/share/nginx/html;
+    index index.html;
+    location / {
+      try_files \$uri \$uri/ =404;
+    }
+  }
+}
+EOF
+    cat > "${DATA_DIR}/reality/www/index.html" <<EOF
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Welcome</title></head>
+<body><main><h1>Welcome</h1><p>This site is up and running.</p></main></body>
+</html>
+EOF
+  fi
+
   cat > "${DATA_DIR}/xray/config.json" <<EOF
 {
   "log": {
@@ -650,7 +753,7 @@ EOF
         "security": "reality",
         "realitySettings": {
           "show": ${REALITY_SHOW},
-          "target": "${REALITY_SNI}:${REALITY_TARGET_PORT}",
+          "target": "${REALITY_TARGET_HOST}:${REALITY_TARGET_PORT}",
           "xver": 0,
           "maxTimeDiff": ${REALITY_MAX_TIME_DIFF},
           "serverNames": ["${REALITY_SNI}"],
@@ -672,6 +775,10 @@ EOF
 }
 EOF
   chmod 0600 "${DATA_DIR}/snell/snell-server.conf" "${DATA_DIR}/hysteria/config.yaml" "${DATA_DIR}/xray/config.json"
+  if [[ "$REALITY_MODE" == "self" ]]; then
+    chmod 0600 "${DATA_DIR}/reality/nginx.conf"
+    chmod 0644 "${DATA_DIR}/reality/www/index.html"
+  fi
 }
 
 write_client_config() {
@@ -711,6 +818,29 @@ configure_firewall() {
   warn "请同时在云厂商安全组放行：80/tcp、${XRAY_PORT}/tcp、${SNELL_PORT}/tcp、${HY2_PORT}/udp。"
 }
 
+wait_for_reality_web() {
+  [[ "$REALITY_MODE" == "self" ]] || return 0
+  local container_id health attempt cert_file
+  container_id=$(docker compose ps -q reality-web)
+  [[ -n "$container_id" ]] || die "Reality 内部站点容器未创建。"
+  log "等待偷自己证书签发与内部 Nginx 就绪"
+  for (( attempt=1; attempt<=60; attempt++ )); do
+    health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$container_id")
+    if [[ "$health" == "healthy" ]]; then
+      cert_file="${DATA_DIR}/hysteria/acme/certificates/acme-v02.api.letsencrypt.org-directory/${REALITY_SNI}/${REALITY_SNI}.crt"
+      openssl x509 -in "$cert_file" -noout -checkhost "$REALITY_SNI" >/dev/null \
+        || die "Reality 内部站点证书不包含域名 ${REALITY_SNI}。"
+      openssl x509 -in "$cert_file" -noout -checkend 86400 >/dev/null \
+        || die "Reality 内部站点证书即将在 24 小时内过期。"
+      ok "Reality 偷自己内部站点已就绪：${REALITY_TARGET_HOST}:${REALITY_TARGET_PORT} (SNI ${REALITY_SNI})"
+      return 0
+    fi
+    sleep 2
+  done
+  docker compose logs --tail=100 hysteria reality-web
+  die "Reality 偷自己内部站点在 120 秒内未就绪，请检查 DNS、TCP 80 与 ACME 日志。"
+}
+
 deploy() {
   cd "$SCRIPT_DIR"
   log "校验 Docker Compose 配置"
@@ -724,7 +854,11 @@ deploy() {
   docker compose ps
 
   local failed=0 service state
-  for service in snell shadow-tls hysteria xray; do
+  local -a services=(snell shadow-tls hysteria xray)
+  if [[ "$REALITY_MODE" == "self" ]]; then
+    services+=(reality-web)
+  fi
+  for service in "${services[@]}"; do
     state=$(docker compose ps --status running --services | grep -Fx "$service" || true)
     if [[ -z "$state" ]]; then
       warn "服务未运行：${service}"
@@ -735,6 +869,7 @@ deploy() {
     docker compose logs --tail=100
     die "至少一个服务启动失败，请查看上面的日志。"
   fi
+  wait_for_reality_web
   ok "全部服务均已启动"
 }
 
@@ -757,9 +892,14 @@ main() {
   install_docker
   collect_settings
   check_dns
-  check_tls13_target "$REALITY_SNI" "Reality 目标" "$REALITY_TARGET_PORT"
-  if [[ "$SHADOWTLS_SNI:$SHADOWTLS_TARGET_PORT" != "$REALITY_SNI:$REALITY_TARGET_PORT" ]]; then
-    check_tls13_target "$SHADOWTLS_SNI" "ShadowTLS 握手目标" "$SHADOWTLS_TARGET_PORT"
+  if [[ "$REALITY_MODE" == "remote" ]]; then
+    check_tls13_target "$REALITY_TARGET_HOST" "$REALITY_SNI" "Reality 外部目标" "$REALITY_TARGET_PORT"
+  else
+    log "Reality 偷自己将使用内部目标 ${REALITY_TARGET_HOST}:${REALITY_TARGET_PORT}，部署后验证证书与 Nginx"
+  fi
+  if [[ "$REALITY_MODE" != "remote" || "$SHADOWTLS_SNI" != "$REALITY_TARGET_HOST" \
+    || "$SHADOWTLS_SNI" != "$REALITY_SNI" || "$SHADOWTLS_TARGET_PORT" != "$REALITY_TARGET_PORT" ]]; then
+    check_tls13_target "$SHADOWTLS_SNI" "$SHADOWTLS_SNI" "ShadowTLS 握手目标" "$SHADOWTLS_TARGET_PORT"
   fi
   preflight_ports
 
@@ -780,4 +920,6 @@ main() {
   print_summary
 }
 
-main "$@"
+if [[ "${INSTALL_SH_LIB_ONLY:-0}" != "1" ]]; then
+  main "$@"
+fi
