@@ -1,16 +1,32 @@
 #!/bin/sh
 set -u
 
-: "${REALITY_CERT_FILE:?missing REALITY_CERT_FILE}"
-: "${REALITY_KEY_FILE:?missing REALITY_KEY_FILE}"
+: "${SELF_WEB_DOMAINS:?missing SELF_WEB_DOMAINS}"
+: "${SELF_WEB_CERT_BASE:?missing SELF_WEB_CERT_BASE}"
 
-while [ ! -s "$REALITY_CERT_FILE" ] || [ ! -s "$REALITY_KEY_FILE" ]; do
-  echo "Waiting for Hysteria ACME certificate: ${REALITY_CERT_FILE}"
+domain_list=$(printf '%s' "$SELF_WEB_DOMAINS" | tr ',' ' ')
+
+certificates_ready() {
+  for domain in $domain_list; do
+    cert_file="${SELF_WEB_CERT_BASE}/${domain}/${domain}.crt"
+    key_file="${SELF_WEB_CERT_BASE}/${domain}/${domain}.key"
+    [ -s "$cert_file" ] && [ -s "$key_file" ] || return 1
+  done
+}
+
+while ! certificates_ready; do
+  echo "Waiting for Hysteria ACME certificates: ${SELF_WEB_DOMAINS}"
   sleep 2
 done
 
 certificate_signature() {
-  cksum "$REALITY_CERT_FILE" "$REALITY_KEY_FILE" | cksum | awk '{ print $1 ":" $2 }'
+  {
+    for domain in $domain_list; do
+      cksum \
+        "${SELF_WEB_CERT_BASE}/${domain}/${domain}.crt" \
+        "${SELF_WEB_CERT_BASE}/${domain}/${domain}.key"
+    done
+  } | cksum | awk '{ print $1 ":" $2 }'
 }
 
 nginx -t
@@ -27,12 +43,12 @@ terminate() {
 trap terminate INT TERM
 
 while kill -0 "$nginx_pid" 2>/dev/null; do
-  sleep "${REALITY_CERT_RELOAD_INTERVAL:-3600}" &
+  sleep "${SELF_WEB_CERT_RELOAD_INTERVAL:-3600}" &
   wait $! 2>/dev/null || true
   kill -0 "$nginx_pid" 2>/dev/null || break
   current_signature=$(certificate_signature)
   if [ "$current_signature" != "$last_signature" ]; then
-    echo "Reality certificate changed; reloading Nginx"
+    echo "Self-hosted certificate changed; reloading Nginx"
     if nginx -t && nginx -s reload; then
       last_signature=$current_signature
     fi

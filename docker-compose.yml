@@ -33,7 +33,7 @@ services:
       MODE: server
       LISTEN: 0.0.0.0:32413
       SERVER: snell:23413
-      TLS: ${SHADOWTLS_SNI}:${SHADOWTLS_TARGET_PORT}
+      TLS: ${SHADOWTLS_SNI}:${SHADOWTLS_TARGET_HOST:-${SHADOWTLS_SNI}}:${SHADOWTLS_TARGET_PORT};${SHADOWTLS_TARGET_HOST:-${SHADOWTLS_SNI}}:${SHADOWTLS_TARGET_PORT}
       PASSWORD: ${SHADOWTLS_PASSWORD}
       V3: "1"
       STRICT: ${SHADOWTLS_STRICT_ENV:-}
@@ -63,6 +63,7 @@ services:
     volumes:
       - ./data/hysteria/config.yaml:/etc/hysteria/config.yaml:ro,Z
       - ./data/hysteria/acme:/var/lib/hysteria/acme:z
+      - ./data/reality/www:/www/masq:ro,Z
     ports:
       - ${HY2_PORT}:32123/udp
       - 80:80/tcp
@@ -88,9 +89,9 @@ services:
       - /bin/sh
       - /opt/reality-web/reload-cert.sh
     environment:
-      REALITY_CERT_FILE: /var/lib/hysteria/acme/certificates/acme-v02.api.letsencrypt.org-directory/${REALITY_SNI}/${REALITY_SNI}.crt
-      REALITY_KEY_FILE: /var/lib/hysteria/acme/certificates/acme-v02.api.letsencrypt.org-directory/${REALITY_SNI}/${REALITY_SNI}.key
-      REALITY_CERT_RELOAD_INTERVAL: "3600"
+      SELF_WEB_DOMAINS: ${SELF_WEB_DOMAINS:-${REALITY_SNI:-}}
+      SELF_WEB_CERT_BASE: /var/lib/hysteria/acme/certificates/acme-v02.api.letsencrypt.org-directory
+      SELF_WEB_CERT_RELOAD_INTERVAL: "3600"
     volumes:
       - ./reality-web/reload-cert.sh:/opt/reality-web/reload-cert.sh:ro,Z
       - ./data/reality/nginx.conf:/etc/nginx/nginx.conf:ro,Z
@@ -112,7 +113,7 @@ services:
     healthcheck:
       test:
         - CMD-SHELL
-        - test -s "$$REALITY_CERT_FILE" && test -s "$$REALITY_KEY_FILE" && nginx -t
+        - nginx -t
       interval: 5s
       timeout: 3s
       retries: 24

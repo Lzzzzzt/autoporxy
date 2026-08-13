@@ -2,9 +2,9 @@
 
 在一台 Linux VPS 上交互式部署以下三个入口：
 
-- Hysteria 2：可配置 UDP 端口，ACME 自动证书，应用层使用标准 BBR，出站 `mode: 46`（IPv4 优先、IPv6 回退）
+- Hysteria 2：可配置 UDP 端口，支持外部网站与“偷自己”本机静态站点伪装，ACME 自动证书，应用层使用标准 BBR，出站 `mode: 46`（IPv4 优先、IPv6 回退）
 - VLESS + REALITY + XTLS Vision：支持外部目标与“偷自己”内部 TLS 站点，Freedom 出站 `UseIPv4v6`
-- Snell v5 + ShadowTLS v3：Snell 仅监听内部 IPv4，出站设置 `ipv6=false`，由 ShadowTLS 对外提供 TCP 入口
+- Snell v5 + ShadowTLS v3：Snell 仅监听内部 IPv4，出站设置 `ipv6=false`；ShadowTLS 支持外部握手站与“偷自己”内部 TLS 站点
 
 脚本会安装依赖与 Docker Compose、下载官方 Snell Server、生成全部凭据、切换 `BBR + fq`、配置已启用的 UFW/firewalld，并输出客户端配置。凭据和运行数据不会进入 Git。
 
@@ -24,7 +24,7 @@ Hysteria、Xray-core、ShadowTLS、Nginx 和 Snell 容器的 Debian 基础镜像
 ## 部署前准备
 
 1. 为 Hysteria 2 准备一个域名，例如 `hy2.example.com`。
-2. 将域名的 **A 记录直接指向 VPS IPv4**。不要开启 CDN 代理。Reality 使用“偷自己”时，可以复用这个域名；如果使用另一个域名，它也必须有直连本机的 A 记录。
+2. 将域名的 **A 记录直接指向 VPS IPv4**。不要开启 CDN 代理。Reality 或 ShadowTLS 使用“偷自己”时，可以复用 HY2 域名；如果使用另一个域名，它也必须有直连本机的 A 记录。
 3. 云厂商安全组至少放行：
    - `80/tcp`：Hysteria ACME HTTP-01 申请和续期证书
    - `<交互选择>/tcp`：VLESS Reality 对外端口
@@ -35,7 +35,7 @@ Hysteria、Xray-core、ShadowTLS、Nginx 和 Snell 容器的 Debian 基础镜像
 ## 一键部署
 
 ```bash
-git clone <你的仓库地址> proxy-stack
+git clone https://github.com/Lzzzzzt/autoporxy.git proxy-stack
 cd proxy-stack
 sudo ./install.sh
 ```
@@ -45,9 +45,9 @@ sudo ./install.sh
 - 节点名称、容器镜像与 Snell Server 版本
 - 客户端连接地址、Hysteria 2 域名与 Let's Encrypt 邮箱
 - Hysteria、Reality、Snell/ShadowTLS 三个对外端口
-- Hysteria 的伪装地址、地址族策略、Fast Open、拥塞算法、测速与 UDP 超时
+- Hysteria 的 `remote/self` 伪装模式、外部伪装地址、地址族策略、Fast Open、拥塞算法、测速与 UDP 超时
 - Reality 的 `remote/self` 模式、SNI、目标端口、时间差、TLS 指纹、地址策略与日志级别
-- ShadowTLS 的握手目标、strict、Fast Open、日志级别
+- ShadowTLS 的 `remote/self` 模式、握手 SNI、独立目标地址/端口、strict、Fast Open、日志级别
 - Snell 的 IPv6、TFO、DNS，以及 Surge 客户端的复用和 TFO
 - 是否启用 BBR + fq
 - 二次运行时是否轮换全部凭据
@@ -70,23 +70,27 @@ sudo ./install.sh
 
 重新运行 `sudo ./install.sh` 可以修改参数，包括三个代理入口的对外端口。脚本会允许当前项目复用原端口，并检查新端口是否被其他程序占用；修改后会同步更新 Compose 映射、防火墙规则和客户端配置。默认保留现有凭据；选择重新生成时会轮换全部客户端凭据。旧配置会备份到 `backups/<时间戳>/`。
 
-## Reality 偷自己模式
+## 偷自己模式
 
-安装器在 Reality 配置阶段提供两种模式：
+三个入口的伪装模式互相独立：
 
-- `remote`：Xray 连接外部 TLS 目标。SNI 与目标地址可以分别设置，适合选择同 ASN、低延迟且支持 TLS 1.3 的站点。
-- `self`：自动启用 Compose 内部的 `reality-web` Nginx。Xray 对外监听 Reality 端口，但鉴权失败的连接回落到内网 Nginx，不会通过公网 443 回连自身。
+- **HY2**：`remote` 反向代理外部 HTTPS 网站；`self` 使用 Hysteria 原生 `file` 模式直接提供本机静态站点，不产生回源流量。
+- **Reality**：`remote` 连接可分别配置 SNI、地址和端口的外部 TLS 1.3 目标；`self` 回落到 Compose 内部 Nginx。
+- **ShadowTLS**：`remote` 使用可分别配置 SNI、地址和端口的外部握手站；`self` 使用 ShadowTLS 的 SNI 映射与内部兜底地址，所有握手流量都进入 Compose 内部 Nginx。
 
-`self` 模式下，偷自己域名必须直接解析到 VPS。默认复用 HY2 域名，也可以输入另一个直连域名；Hysteria 的 ACME 会为所有需要的域名签发证书。Nginx 只监听 Compose 内网，不新增公网端口，并以只读方式挂载 ACME 证书。证书续期发生变化后，内部监控脚本会自动检查并 reload Nginx。
+Reality 或 ShadowTLS 使用 `self` 时，会启用共享的 `reality-web` Nginx。偷自己域名默认复用 HY2 域名，也可以分别输入其他直连域名；Hysteria 的 ACME 会去重并为所有域名签发证书。Nginx 只监听 Compose 内网，不新增公网端口，并以只读方式挂载证书。证书续期后，监控脚本会检查并 reload Nginx。
 
-首次签发可能需要几十秒，安装器最多等待 120 秒。内部关系如下：
+HY2 的 `self` 静态文件与内部 Nginx 共用同一份站点内容，但由 Hysteria 自己通过 HTTP/3 提供。首次签发可能需要几十秒，安装器最多等待 120 秒。内部关系如下：
 
 ```text
-客户端 -> VPS Reality TCP 端口 -> Xray -> reality-web:8443
-                                      (自己的域名与有效证书)
+HTTP/3 探测 -> VPS HY2 UDP 端口 -> Hysteria -> 本机静态文件
+
+客户端/探测 -> VPS Reality TCP 端口 -> Xray -------> reality-web:8443
+客户端/探测 -> VPS ShadowTLS TCP 端口 -> ShadowTLS -> reality-web:8443
+                                                     (自己的域名与有效证书)
 ```
 
-从 `self` 切回 `remote` 后重新运行安装器即可；部署命令会停止不再启用的内部站点。
+所有内部连接都使用 Compose 网络，不会通过公网代理端口回连自身。Reality 和 ShadowTLS 都切回 `remote` 后，部署命令会停止不再需要的内部 Nginx。
 
 ## 版本更新
 
@@ -119,8 +123,10 @@ docker compose logs --tail=200
 常见问题：
 
 - Hysteria 日志出现 ACME 失败：检查域名 A 记录、TCP 80、安全组和本机防火墙。
+- HY2 偷自己页面异常：确认 `data/reality/www/index.html` 存在，并检查 Hysteria 配置中的 `masquerade.type` 是否为 `file`。
 - Reality 无法连接：确认 TCP 端口放行，客户端 URI 中 `pbk`、`sid`、`sni` 未被改动。
-- Reality 偷自己站点未就绪：确认偷自己域名直连本机、TCP 80 可达，并查看 `hysteria` 与 `reality-web` 日志。
+- Reality/ShadowTLS 偷自己站点未就绪：确认所有偷自己域名直连本机、TCP 80 可达，并查看 `hysteria` 与 `reality-web` 日志。
+- ShadowTLS 无法连接：确认客户端 SNI 与安装时填写的域名一致，并检查内部 Nginx 是否支持 TLS 1.3。
 - ShadowTLS 启动报 io_uring/memlock 错误：先查看日志；极小内存或受限虚拟化环境可能不支持所需能力。
 - BBR 不可用：升级 VPS 内核，或确认服务商没有禁用拥塞控制模块。
 
