@@ -8,6 +8,8 @@
 
 脚本会安装依赖与 Docker Compose、下载官方 Snell Server、生成全部凭据、切换 `BBR + fq`、配置已启用的 UFW/firewalld，并输出客户端配置。凭据和运行数据不会进入 Git。
 
+DNS 默认使用 VPS/容器的系统解析器；也可以在交互过程中输入一个自定义 IPv4 DNS 服务器，并同步应用到全部代理服务。
+
 三个代理入口的公网端口均可交互修改。首次部署直接回车时，会为每个入口生成一个互不重复的 `10000–65535` 随机高端口；二次运行直接回车则保留现有端口。
 
 Hysteria、Xray-core、ShadowTLS、Nginx 和 Snell 容器的 Debian 基础镜像均默认使用 `latest`；需要稳定复现时，也可以在交互过程中输入明确标签。Snell Server 是官方二进制下载，默认版本为 `v5.0.1`。
@@ -44,11 +46,12 @@ sudo ./install.sh
 
 - 节点名称、容器镜像与 Snell Server 版本
 - 客户端连接地址、Hysteria 2 域名与 Let's Encrypt 邮箱
+- 全局 DNS：默认 `system`，也可输入自定义 IPv4 DNS 服务器
 - Hysteria、Reality、Snell/ShadowTLS 三个对外端口
 - Hysteria 的 `remote/self` 伪装模式、外部伪装地址、地址族策略、Fast Open、拥塞算法、测速与 UDP 超时
 - Reality 的 `remote/self` 模式、SNI、目标端口、时间差、TLS 指纹、地址策略与日志级别
 - ShadowTLS 的 `remote/self` 模式、握手 SNI、独立目标地址/端口、strict、Fast Open、日志级别
-- Snell 的 IPv6、TFO、DNS，以及 Surge 客户端的复用和 TFO
+- Snell 的 IPv6、TFO，以及 Surge 客户端的复用和 TFO
 - 是否启用 BBR + fq
 - 二次运行时是否轮换全部凭据
 
@@ -69,6 +72,12 @@ sudo ./install.sh
 ```
 
 重新运行 `sudo ./install.sh` 可以修改参数，包括三个代理入口的对外端口。脚本会允许当前项目复用原端口，并检查新端口是否被其他程序占用；修改后会同步更新 Compose 映射、防火墙规则和客户端配置。默认保留现有凭据；选择重新生成时会轮换全部客户端凭据。旧配置会备份到 `backups/<时间戳>/`。
+
+## DNS
+
+DNS 交互项直接回车时使用 `system`：生成的 Hysteria 和 Xray 配置不会写入显式解析器，容器也不会覆盖系统 DNS。输入一个 IPv4 地址（例如 `1.1.1.1`）时，会同步写入 Hysteria resolver、Xray DNS、Snell DNS 和各容器的 Compose DNS，供外部伪装站、握手目标、ACME 等域名解析使用。
+
+重新运行安装器即可在系统 DNS 与自定义 DNS 之间切换；`./manage.sh status` 会显示当前选择。
 
 ## 偷自己模式
 

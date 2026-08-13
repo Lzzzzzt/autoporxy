@@ -21,6 +21,8 @@ set_common_values() {
   SERVER_ADDRESS=203.0.113.10
   HY2_DOMAIN=hy2.example.com
   ACME_EMAIL=
+  DNS_MODE=system
+  DNS_SERVER=
   HY2_PORT=23456
   XRAY_PORT=34567
   SNELL_PORT=45678
@@ -103,14 +105,19 @@ assert_contains() {
 }
 
 run_case() {
-  local name=$1 hy2_mode=$2 reality_mode=$3 shadowtls_mode=$4 same_domain=$5
-  local case_dir="${TEST_ROOT}/${name}" compose_config
+  local name=$1 hy2_mode=$2 reality_mode=$3 shadowtls_mode=$4 same_domain=$5 dns_server=${6:-}
+  local case_dir="${TEST_ROOT}/${name}" compose_config expected_dns_services
   install -d -m 0700 "$case_dir"
   DATA_DIR="${case_dir}/data"
   ENV_FILE="${case_dir}/stack.env"
   CLIENT_FILE="${case_dir}/client-config.txt"
 
   set_common_values
+  if [[ -n "$dns_server" ]]; then
+    DNS_MODE=custom
+    DNS_SERVER=$dns_server
+    SNELL_DNS=$dns_server
+  fi
   configure_modes "$hy2_mode" "$reality_mode" "$shadowtls_mode" "$same_domain"
   write_service_configs
   write_env
@@ -135,12 +142,31 @@ run_case() {
     [[ ! -e "${DATA_DIR}/reality/nginx.conf" ]]
   fi
 
+  if [[ "$DNS_MODE" == "custom" ]]; then
+    assert_contains "${DATA_DIR}/snell/snell-server.conf" "dns = ${DNS_SERVER}"
+    assert_contains "${DATA_DIR}/hysteria/config.yaml" 'resolver:'
+    assert_contains "${DATA_DIR}/hysteria/config.yaml" "addr: ${DNS_SERVER}:53"
+    assert_contains "${DATA_DIR}/xray/config.json" "\"servers\": [\"${DNS_SERVER}\"]"
+  else
+    ! grep -Fq 'dns = ' "${DATA_DIR}/snell/snell-server.conf"
+    ! grep -Fq 'resolver:' "${DATA_DIR}/hysteria/config.yaml"
+    ! grep -Fq '"dns":' "${DATA_DIR}/xray/config.json"
+  fi
+
   if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
     compose_config=$(docker compose --env-file "$ENV_FILE" -f "${PROJECT_DIR}/docker-compose.yml" config)
     if [[ "$SHADOWTLS_MODE" == "self" ]]; then
       [[ "$compose_config" == *"${SHADOWTLS_SNI}:reality-web:8443;reality-web:8443"* ]]
     else
       [[ "$compose_config" == *"${SHADOWTLS_SNI}:www.apple.com:443;www.apple.com:443"* ]]
+    fi
+    if [[ "$DNS_MODE" == "custom" ]]; then
+      expected_dns_services=4
+      [[ "$COMPOSE_PROFILES" == "self" ]] && expected_dns_services=5
+      [[ $(printf '%s\n' "$compose_config" | grep -c '^    dns:') -eq "$expected_dns_services" ]]
+      [[ "$compose_config" == *"- ${DNS_SERVER}"* ]]
+    else
+      [[ "$compose_config" != *$'    dns:\n'* ]]
     fi
   fi
 
@@ -153,6 +179,7 @@ run_case reality-self remote self remote false
 run_case shadowtls-self remote remote self false
 run_case all-self-same-domain self self self true
 run_case all-self-distinct-domain self self self false
+run_case custom-dns remote remote remote false 1.1.1.1
 
 prompt_value() { printf '%s' "$2"; }
 detect_public_ipv4() { printf '%s' '203.0.113.10'; }
@@ -166,7 +193,19 @@ collect_settings >/dev/null
 [[ "$COMPOSE_PROFILES" == "self" ]]
 printf '[OK] existing self-mode settings round trip\n'
 
-awk -F= '$1 !~ /^(HY2_MASQUERADE_MODE|SHADOWTLS_MODE|SHADOWTLS_TARGET_HOST|SELF_WEB_PORT|SELF_WEB_DOMAINS)$/' \
+ENV_FILE="${TEST_ROOT}/custom-dns/stack.env"
+collect_settings >/dev/null
+[[ "$DNS_MODE" == "custom" && "$DNS_SERVER" == "1.1.1.1" && "$SNELL_DNS" == "1.1.1.1" ]]
+printf '[OK] custom DNS settings round trip\n'
+
+awk -F= '$1 !~ /^(DNS_MODE|DNS_SERVER)$/' \
+  "${TEST_ROOT}/custom-dns/stack.env" > "${TEST_ROOT}/legacy-custom-dns.env"
+ENV_FILE="${TEST_ROOT}/legacy-custom-dns.env"
+collect_settings >/dev/null
+[[ "$DNS_MODE" == "custom" && "$DNS_SERVER" == "1.1.1.1" && "$SNELL_DNS" == "1.1.1.1" ]]
+printf '[OK] legacy Snell DNS migration\n'
+
+awk -F= '$1 !~ /^(DNS_MODE|DNS_SERVER|HY2_MASQUERADE_MODE|SHADOWTLS_MODE|SHADOWTLS_TARGET_HOST|SELF_WEB_PORT|SELF_WEB_DOMAINS)$/' \
   "${TEST_ROOT}/reality-self/stack.env" > "${TEST_ROOT}/legacy.env"
 ENV_FILE="${TEST_ROOT}/legacy.env"
 collect_settings >/dev/null
@@ -175,3 +214,10 @@ collect_settings >/dev/null
 [[ "$SHADOWTLS_MODE" == "remote" && "$SHADOWTLS_TARGET_HOST" == "$SHADOWTLS_SNI" ]]
 [[ "$SELF_WEB_PORT" == "8443" && "$SELF_WEB_DOMAINS" == "reality.example.com" ]]
 printf '[OK] legacy settings migration\n'
+
+dig() { printf '%s\n' '1.1.1.1' 'not-an-address' '999.1.1.1'; }
+DNS_MODE=custom
+DNS_SERVER=1.1.1.1
+[[ "$(resolve_ipv4 example.com)" == "1.1.1.1" ]]
+unset -f dig
+printf '[OK] custom DNS preflight resolver\n'

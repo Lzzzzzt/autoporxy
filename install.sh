@@ -81,17 +81,18 @@ validate_domain() {
   [[ ${#value} -le 253 ]] && [[ "$value" =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$ ]]
 }
 
-validate_endpoint() {
+validate_ipv4() {
   local value=$1 octet
   local -a octets
-  if [[ "$value" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
-    IFS=. read -r -a octets <<< "$value"
-    for octet in "${octets[@]}"; do
-      (( 10#$octet <= 255 )) || return 1
-    done
-    return 0
-  fi
-  validate_domain "$value"
+  [[ "$value" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+  IFS=. read -r -a octets <<< "$value"
+  for octet in "${octets[@]}"; do
+    (( 10#$octet <= 255 )) || return 1
+  done
+}
+
+validate_endpoint() {
+  validate_ipv4 "$1" || validate_domain "$1"
 }
 
 validate_email() {
@@ -146,7 +147,7 @@ validate_domain_strategy() {
   [[ "$1" =~ ^(AsIs|UseIP|UseIPv6v4|UseIPv6|UseIPv4v6|UseIPv4|ForceIP|ForceIPv6v4|ForceIPv6|ForceIPv4v6|ForceIPv4)$ ]]
 }
 validate_snell_version() { [[ "$1" =~ ^[45]\.[0-9]+\.[0-9]+([A-Za-z0-9.-]*)?$ ]]; }
-validate_snell_dns() { [[ -z "$1" || "$1" =~ ^[0-9A-Fa-f:.,]+$ ]]; }
+validate_dns_selection() { [[ "${1,,}" == "system" ]] || validate_ipv4 "$1"; }
 
 self_web_enabled() {
   [[ "${REALITY_MODE:-remote}" == "self" || "${SHADOWTLS_MODE:-remote}" == "self" ]]
@@ -210,9 +211,9 @@ install_base_dependencies() {
   if [[ "$family" == "apt" ]]; then
     export DEBIAN_FRONTEND=noninteractive
     apt-get update
-    apt-get install -y ca-certificates curl gnupg openssl unzip iproute2 kmod coreutils findutils
+    apt-get install -y ca-certificates curl gnupg openssl unzip iproute2 kmod coreutils findutils dnsutils
   else
-    dnf -y install ca-certificates curl gnupg2 openssl unzip iproute kmod coreutils findutils dnf-plugins-core
+    dnf -y install ca-certificates curl gnupg2 openssl unzip iproute kmod coreutils findutils bind-utils dnf-plugins-core
   fi
 }
 
@@ -339,6 +340,7 @@ collect_settings() {
   local old_hy2_masquerade_mode old_reality_mode old_reality_sni
   local old_shadowtls_mode old_shadowtls_sni default_reality_sni default_reality_port
   local default_shadowtls_sni default_shadowtls_port default_self_web_port
+  local dns_selection old_dns_mode old_dns_server legacy_snell_dns
   detected_ip=$(detect_public_ipv4)
 
   printf '\n%s\n' '--- 节点与镜像配置 ---'
@@ -367,6 +369,30 @@ collect_settings() {
   HY2_DOMAIN=${HY2_DOMAIN,,}
   old_value=$(env_get ACME_EMAIL)
   ask_until_valid ACME_EMAIL "Let's Encrypt 邮箱（可留空）" "${old_value:-}" validate_email
+
+  old_dns_mode=$(env_get DNS_MODE)
+  old_dns_server=$(env_get DNS_SERVER)
+  legacy_snell_dns=$(env_get SNELL_DNS)
+  if [[ "$old_dns_mode" == "custom" && -n "$old_dns_server" ]]; then
+    dns_selection=$old_dns_server
+  elif [[ -z "$old_dns_mode" && -n "$legacy_snell_dns" && "$legacy_snell_dns" != *,* ]] \
+    && validate_ipv4 "$legacy_snell_dns"; then
+    dns_selection=$legacy_snell_dns
+  else
+    dns_selection=system
+  fi
+  ask_until_valid DNS_SELECTION "DNS 服务器（system=系统 DNS，或自定义 IPv4）" \
+    "$dns_selection" validate_dns_selection
+  DNS_SELECTION=${DNS_SELECTION,,}
+  if [[ "$DNS_SELECTION" == "system" ]]; then
+    DNS_MODE=system
+    DNS_SERVER=""
+    SNELL_DNS=""
+  else
+    DNS_MODE=custom
+    DNS_SERVER=$DNS_SELECTION
+    SNELL_DNS=$DNS_SERVER
+  fi
 
   old_value=$(env_get HY2_PORT)
   default_hy2_port=${old_value:-$(random_high_port)}
@@ -494,8 +520,6 @@ collect_settings() {
   ask_until_valid SNELL_IPV6 "Snell 出站 IPv6 (true/false)" "${old_value:-false}" validate_bool
   old_value=$(env_get SNELL_TFO)
   ask_until_valid SNELL_TFO "Snell Server TCP Fast Open (true/false)" "${old_value:-true}" validate_bool
-  old_value=$(env_get SNELL_DNS)
-  ask_until_valid SNELL_DNS "Snell DNS 服务器（IP，可留空）" "${old_value:-}" validate_snell_dns
   old_value=$(env_get SNELL_CLIENT_REUSE)
   ask_until_valid SNELL_CLIENT_REUSE "Surge Snell 连接复用 (true/false)" "${old_value:-true}" validate_bool
   old_value=$(env_get SNELL_CLIENT_TFO)
@@ -536,6 +560,19 @@ collect_settings() {
   if [[ "$SHADOWTLS_FAST_OPEN" == "true" ]]; then SHADOWTLS_FAST_OPEN_ENV=1; fi
 }
 
+resolve_ipv4() {
+  local domain=$1 answer
+  if [[ "${DNS_MODE:-system}" == "custom" && -n "${DNS_SERVER:-}" ]]; then
+    while IFS= read -r answer; do
+      if validate_ipv4 "$answer"; then
+        printf '%s\n' "$answer"
+      fi
+    done < <(dig @"$DNS_SERVER" "$domain" A +short +time=5 +tries=2 2>/dev/null || true)
+  else
+    getent ahostsv4 "$domain" 2>/dev/null | awk '{print $1}'
+  fi
+}
+
 check_dns() {
   local detected_ip resolved domain label index
   local -a domains labels
@@ -554,7 +591,7 @@ check_dns() {
   for index in "${!domains[@]}"; do
     domain=${domains[$index]}
     label=${labels[$index]}
-    resolved=$(getent ahostsv4 "$domain" 2>/dev/null | awk '{print $1}' | sort -u | paste -sd, - || true)
+    resolved=$(resolve_ipv4 "$domain" | sort -u | paste -sd, - || true)
     if [[ -z "$resolved" ]]; then
       warn "${label} 域名 ${domain} 暂时没有可解析的 A 记录；ACME 签发会失败。"
       prompt_yes_no "仍然继续？" n || die "请先配置 DNS A 记录。"
@@ -568,8 +605,15 @@ check_dns() {
 }
 
 check_tls13_target() {
-  local target=$1 server_name=$2 label=$3 port=$4 tls_output
-  tls_output=$(timeout 10 openssl s_client -connect "${target}:${port}" -servername "$server_name" -tls1_3 </dev/null 2>/dev/null || true)
+  local target=$1 server_name=$2 label=$3 port=$4 tls_output connect_host
+  connect_host=$target
+  if [[ "${DNS_MODE:-system}" == "custom" ]] && validate_domain "$target"; then
+    connect_host=$(resolve_ipv4 "$target" | sed -n '1p')
+  fi
+  tls_output=""
+  if [[ -n "$connect_host" ]]; then
+    tls_output=$(timeout 10 openssl s_client -connect "${connect_host}:${port}" -servername "$server_name" -tls1_3 </dev/null 2>/dev/null || true)
+  fi
   if [[ "$tls_output" == *'TLSv1.3'* ]]; then
     ok "${label} 支持 TLS 1.3：${target}:${port} (SNI ${server_name})"
   else
@@ -702,6 +746,8 @@ write_env() {
     printf 'SERVER_ADDRESS=%s\n' "$SERVER_ADDRESS"
     printf 'HY2_DOMAIN=%s\n' "$HY2_DOMAIN"
     printf 'ACME_EMAIL=%s\n' "$ACME_EMAIL"
+    printf 'DNS_MODE=%s\n' "$DNS_MODE"
+    printf 'DNS_SERVER=%s\n' "$DNS_SERVER"
     printf 'HY2_PORT=%s\n' "$HY2_PORT"
     printf 'XRAY_PORT=%s\n' "$XRAY_PORT"
     printf 'SNELL_PORT=%s\n' "$SNELL_PORT"
@@ -814,7 +860,19 @@ EOF
   type: http
   http:
     altPort: 80
+EOF
 
+  if [[ "$DNS_MODE" == "custom" ]]; then
+    cat >> "${DATA_DIR}/hysteria/config.yaml" <<EOF
+resolver:
+  type: udp
+  udp:
+    addr: ${DNS_SERVER}:53
+    timeout: 4s
+
+EOF
+  fi
+  cat >> "${DATA_DIR}/hysteria/config.yaml" <<EOF
 auth:
   type: password
   password: "${HY2_PASSWORD}"
@@ -897,6 +955,15 @@ EOF
   "log": {
     "loglevel": "${XRAY_LOG_LEVEL}"
   },
+EOF
+  if [[ "$DNS_MODE" == "custom" ]]; then
+    cat >> "${DATA_DIR}/xray/config.json" <<EOF
+  "dns": {
+    "servers": ["${DNS_SERVER}"]
+  },
+EOF
+  fi
+  cat >> "${DATA_DIR}/xray/config.json" <<EOF
   "inbounds": [
     {
       "tag": "vless-reality",
@@ -1047,6 +1114,7 @@ print_summary() {
     "$HY2_PORT" "$XRAY_PORT" "$SNELL_PORT"
   printf '伪装模式：HY2 %s，Reality %s，ShadowTLS %s\n\n' \
     "$HY2_MASQUERADE_MODE" "$REALITY_MODE" "$SHADOWTLS_MODE"
+  printf 'DNS：%s\n\n' "${DNS_SERVER:-system（系统 DNS）}"
   cat "$CLIENT_FILE"
   printf '\n客户端配置已保存到：%s\n' "$CLIENT_FILE"
   printf '查看状态：cd %s && ./manage.sh status\n' "$SCRIPT_DIR"

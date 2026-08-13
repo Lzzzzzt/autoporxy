@@ -31,6 +31,13 @@ env_get() {
 case "${1:-}" in
   status)
     docker compose ps
+    dns_mode=$(env_get DNS_MODE)
+    dns_server=$(env_get DNS_SERVER)
+    if [[ "$dns_mode" == "custom" && -n "$dns_server" ]]; then
+      printf '\nDNS：custom (%s)\n' "$dns_server"
+    else
+      printf '\nDNS：system（系统 DNS）\n'
+    fi
     printf '\n监听端口：\n'
     ss -lntup 2>/dev/null | grep -E ":(80|$(env_get XRAY_PORT)|$(env_get SNELL_PORT)|$(env_get HY2_PORT))([[:space:]]|$)" || true
     printf '\n内核网络参数：\n'

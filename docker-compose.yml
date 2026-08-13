@@ -12,6 +12,7 @@ services:
       context: ./snell
       args:
         DEBIAN_IMAGE: ${DEBIAN_IMAGE}
+    dns: ${DNS_SERVER:-}
     restart: unless-stopped
     read_only: true
     cap_drop:
@@ -26,6 +27,7 @@ services:
 
   shadow-tls:
     image: ${SHADOWTLS_IMAGE}
+    dns: ${DNS_SERVER:-}
     restart: unless-stopped
     depends_on:
       - snell
@@ -55,6 +57,7 @@ services:
 
   hysteria:
     image: ${HYSTERIA_IMAGE}
+    dns: ${DNS_SERVER:-}
     restart: unless-stopped
     command:
       - server
@@ -81,6 +84,7 @@ services:
     profiles:
       - self
     image: ${NGINX_IMAGE:-nginx:latest}
+    dns: ${DNS_SERVER:-}
     restart: unless-stopped
     depends_on:
       hysteria:
@@ -124,6 +128,7 @@ services:
 
   xray:
     image: ${XRAY_IMAGE}
+    dns: ${DNS_SERVER:-}
     restart: unless-stopped
     command:
       - run
