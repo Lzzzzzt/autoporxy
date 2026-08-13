@@ -8,7 +8,7 @@
 
 脚本会安装依赖与 Docker Compose、下载官方 Snell Server、生成全部凭据、切换 `BBR + fq`、配置已启用的 UFW/firewalld，并输出客户端配置。凭据和运行数据不会进入 Git。
 
-当前锁定版本（2026-08-13 核对）：Hysteria `v2.12.0`、Xray-core `26.7.28`、ShadowTLS `v0.2.25`、Snell Server `v5.0.1`。
+Hysteria、Xray-core、ShadowTLS 和 Snell 容器的 Debian 基础镜像均默认使用 `latest`；需要稳定复现时，也可以在交互过程中输入明确标签。Snell Server 是官方二进制下载，默认版本为 `v5.0.1`。
 
 ## 支持环境
 
@@ -40,10 +40,13 @@ sudo ./install.sh
 
 脚本会依次询问：
 
-- 客户端连接地址
-- Hysteria 2 域名与 Let's Encrypt 邮箱
-- 三个对外端口
-- Reality 与 ShadowTLS 的伪装/握手域名
+- 节点名称、四个容器镜像与 Snell Server 版本
+- 客户端连接地址、Hysteria 2 域名与 Let's Encrypt 邮箱
+- Hysteria、Reality、Snell/ShadowTLS 三个对外端口
+- Hysteria 的伪装地址、地址族策略、Fast Open、拥塞算法、测速与 UDP 超时
+- Reality 的伪装目标、目标端口、时间差、TLS 指纹、地址策略与日志级别
+- ShadowTLS 的握手目标、strict、Fast Open、日志级别
+- Snell 的 IPv6、TFO、DNS，以及 Surge 客户端的复用和 TFO
 - 是否启用 BBR + fq
 - 二次运行时是否轮换全部凭据
 
@@ -66,13 +69,13 @@ sudo ./install.sh
 
 ## 版本更新
 
-镜像版本锁在 `.env` 与 `.env.example` 中，避免 `latest` 带来的不可控升级。修改 `.env` 中的明确版本标签后运行：
+首次部署时镜像默认值均为 `latest`。运行下面的命令会拉取当前标签的最新镜像并重建 Snell 容器：
 
 ```bash
 ./manage.sh update
 ```
 
-`update` 只拉取 `.env` 指定的版本，不会自动改到未知的新版本。
+如果希望避免 `latest` 自动变化，重新运行安装器，在镜像提示处输入明确版本标签；已有 `.env` 中的值会作为下次交互默认值保留。
 
 ## BBR 与协议行为
 

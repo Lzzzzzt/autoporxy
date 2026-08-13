@@ -100,6 +100,27 @@ validate_port() {
   [[ "$value" =~ ^[1-9][0-9]*$ ]] && (( 10#$value <= 65535 ))
 }
 
+validate_bool() { [[ "$1" == "true" || "$1" == "false" ]]; }
+validate_nonnegative_integer() { [[ "$1" =~ ^[0-9]+$ ]]; }
+validate_node_name() { [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$ ]]; }
+validate_image() { [[ "$1" =~ ^[A-Za-z0-9._/@:+-]+$ ]]; }
+validate_url() {
+  local pattern='^https://[A-Za-z0-9._~:/?&=%+#-]+$'
+  [[ "$1" =~ $pattern ]]
+}
+validate_hy2_mode() { [[ "$1" =~ ^(auto|46|64|4|6)$ ]]; }
+validate_congestion() { [[ "$1" == "bbr" || "$1" == "reno" ]]; }
+validate_bbr_profile() { [[ "$1" =~ ^(standard|conservative|aggressive)$ ]]; }
+validate_duration() { [[ "$1" =~ ^[1-9][0-9]*(ms|s|m|h)$ ]]; }
+validate_fingerprint() { [[ "$1" =~ ^[A-Za-z0-9._-]+$ ]]; }
+validate_xray_log_level() { [[ "$1" =~ ^(debug|info|warning|error|none)$ ]]; }
+validate_shadow_log_level() { [[ "$1" =~ ^(trace|debug|info|warn|error|off)$ ]]; }
+validate_domain_strategy() {
+  [[ "$1" =~ ^(AsIs|UseIP|UseIPv6v4|UseIPv6|UseIPv4v6|UseIPv4|ForceIP|ForceIPv6v4|ForceIPv6|ForceIPv4v6|ForceIPv4)$ ]]
+}
+validate_snell_version() { [[ "$1" =~ ^[45]\.[0-9]+\.[0-9]+([A-Za-z0-9.-]*)?$ ]]; }
+validate_snell_dns() { [[ -z "$1" || "$1" =~ ^[0-9A-Fa-f:.,]+$ ]]; }
+
 ask_until_valid() {
   local variable_name=$1 prompt=$2 default_value=$3 validator=$4 value
   while true; do
@@ -277,6 +298,23 @@ collect_settings() {
   local detected_ip old_value
   detected_ip=$(detect_public_ipv4)
 
+  printf '\n%s\n' '--- 节点与镜像配置 ---'
+  old_value=$(env_get NODE_NAME)
+  ask_until_valid NODE_NAME "客户端节点名称" "${old_value:-VPS}" validate_node_name
+
+  old_value=$(env_get HYSTERIA_IMAGE)
+  ask_until_valid HYSTERIA_IMAGE "Hysteria 镜像" "${old_value:-tobyxdd/hysteria:latest}" validate_image
+  old_value=$(env_get XRAY_IMAGE)
+  ask_until_valid XRAY_IMAGE "Xray 镜像" "${old_value:-ghcr.io/xtls/xray-core:latest}" validate_image
+  old_value=$(env_get SHADOWTLS_IMAGE)
+  ask_until_valid SHADOWTLS_IMAGE "ShadowTLS 镜像" "${old_value:-ghcr.io/ihciah/shadow-tls:latest}" validate_image
+  old_value=$(env_get DEBIAN_IMAGE)
+  ask_until_valid DEBIAN_IMAGE "Snell 基础镜像" "${old_value:-debian:latest}" validate_image
+  old_value=$(env_get SNELL_VERSION)
+  ask_until_valid SNELL_VERSION "Snell Server 版本 (4.x/5.x)" "${old_value:-5.0.1}" validate_snell_version
+  SNELL_CLIENT_VERSION=${SNELL_VERSION%%.*}
+
+  printf '\n%s\n' '--- 地址、证书与端口 ---'
   old_value=$(env_get SERVER_ADDRESS)
   ask_until_valid SERVER_ADDRESS "客户端连接地址（VPS IPv4 或直连域名）" "${old_value:-$detected_ip}" validate_endpoint
   old_value=$(env_get HY2_DOMAIN)
@@ -295,23 +333,66 @@ collect_settings() {
   (( XRAY_PORT != SNELL_PORT )) || die "Reality 与 Snell 都使用 TCP，端口不能相同。"
   (( XRAY_PORT != 80 && SNELL_PORT != 80 )) || die "TCP 80 保留给 Hysteria ACME HTTP-01。"
 
+  printf '\n%s\n' '--- Hysteria 2 高级配置 ---'
+  old_value=$(env_get HY2_MASQUERADE_URL)
+  ask_until_valid HY2_MASQUERADE_URL "HY2 伪装网址" "${old_value:-https://www.apple.com/}" validate_url
+  old_value=$(env_get HY2_OUTBOUND_MODE)
+  ask_until_valid HY2_OUTBOUND_MODE "HY2 出站地址族模式 (auto/46/64/4/6)" "${old_value:-46}" validate_hy2_mode
+  old_value=$(env_get HY2_FAST_OPEN)
+  ask_until_valid HY2_FAST_OPEN "HY2 出站 Fast Open (true/false)" "${old_value:-true}" validate_bool
+  old_value=$(env_get HY2_CONGESTION)
+  ask_until_valid HY2_CONGESTION "HY2 拥塞算法 (bbr/reno)" "${old_value:-bbr}" validate_congestion
+  old_value=$(env_get HY2_BBR_PROFILE)
+  ask_until_valid HY2_BBR_PROFILE "HY2 BBR 配置 (standard/conservative/aggressive)" "${old_value:-standard}" validate_bbr_profile
+  old_value=$(env_get HY2_SPEED_TEST)
+  ask_until_valid HY2_SPEED_TEST "允许 HY2 客户端测速 (true/false)" "${old_value:-false}" validate_bool
+  old_value=$(env_get HY2_UDP_IDLE_TIMEOUT)
+  ask_until_valid HY2_UDP_IDLE_TIMEOUT "HY2 UDP 空闲超时" "${old_value:-60s}" validate_duration
+
+  printf '\n%s\n' '--- VLESS Reality 高级配置 ---'
   old_value=$(env_get REALITY_SNI)
   ask_until_valid REALITY_SNI "Reality 伪装域名" "${old_value:-www.apple.com}" validate_domain
   REALITY_SNI=${REALITY_SNI,,}
+  old_value=$(env_get REALITY_TARGET_PORT)
+  ask_until_valid REALITY_TARGET_PORT "Reality 目标 TCP 端口" "${old_value:-443}" validate_port
+  old_value=$(env_get REALITY_SHOW)
+  ask_until_valid REALITY_SHOW "Reality 调试输出 (true/false)" "${old_value:-false}" validate_bool
+  old_value=$(env_get REALITY_MAX_TIME_DIFF)
+  ask_until_valid REALITY_MAX_TIME_DIFF "Reality 最大时差毫秒 (0 为不限)" "${old_value:-0}" validate_nonnegative_integer
+  old_value=$(env_get REALITY_FINGERPRINT)
+  ask_until_valid REALITY_FINGERPRINT "Reality 客户端 TLS 指纹" "${old_value:-chrome}" validate_fingerprint
+  old_value=$(env_get XRAY_DOMAIN_STRATEGY)
+  ask_until_valid XRAY_DOMAIN_STRATEGY "Xray Freedom 地址策略" "${old_value:-UseIPv4v6}" validate_domain_strategy
+  old_value=$(env_get XRAY_LOG_LEVEL)
+  ask_until_valid XRAY_LOG_LEVEL "Xray 日志级别" "${old_value:-warning}" validate_xray_log_level
+
+  printf '\n%s\n' '--- Snell + ShadowTLS 高级配置 ---'
   old_value=$(env_get SHADOWTLS_SNI)
   ask_until_valid SHADOWTLS_SNI "ShadowTLS v3 握手域名" "${old_value:-www.apple.com}" validate_domain
   SHADOWTLS_SNI=${SHADOWTLS_SNI,,}
+  old_value=$(env_get SHADOWTLS_TARGET_PORT)
+  ask_until_valid SHADOWTLS_TARGET_PORT "ShadowTLS 握手目标 TCP 端口" "${old_value:-443}" validate_port
+  old_value=$(env_get SHADOWTLS_STRICT)
+  ask_until_valid SHADOWTLS_STRICT "ShadowTLS strict 模式 (true/false)" "${old_value:-true}" validate_bool
+  old_value=$(env_get SHADOWTLS_FAST_OPEN)
+  ask_until_valid SHADOWTLS_FAST_OPEN "ShadowTLS TCP Fast Open (true/false)" "${old_value:-true}" validate_bool
+  old_value=$(env_get SHADOWTLS_LOG_LEVEL)
+  ask_until_valid SHADOWTLS_LOG_LEVEL "ShadowTLS 日志级别" "${old_value:-warn}" validate_shadow_log_level
+  old_value=$(env_get SNELL_IPV6)
+  ask_until_valid SNELL_IPV6 "Snell 出站 IPv6 (true/false)" "${old_value:-false}" validate_bool
+  old_value=$(env_get SNELL_TFO)
+  ask_until_valid SNELL_TFO "Snell Server TCP Fast Open (true/false)" "${old_value:-true}" validate_bool
+  old_value=$(env_get SNELL_DNS)
+  ask_until_valid SNELL_DNS "Snell DNS 服务器（IP，可留空）" "${old_value:-}" validate_snell_dns
+  old_value=$(env_get SNELL_CLIENT_REUSE)
+  ask_until_valid SNELL_CLIENT_REUSE "Surge Snell 连接复用 (true/false)" "${old_value:-true}" validate_bool
+  old_value=$(env_get SNELL_CLIENT_TFO)
+  ask_until_valid SNELL_CLIENT_TFO "Surge Snell TCP Fast Open (true/false)" "${old_value:-true}" validate_bool
 
-  HYSTERIA_IMAGE=${HYSTERIA_IMAGE:-$(env_get HYSTERIA_IMAGE)}
-  HYSTERIA_IMAGE=${HYSTERIA_IMAGE:-tobyxdd/hysteria:v2.12.0}
-  XRAY_IMAGE=${XRAY_IMAGE:-$(env_get XRAY_IMAGE)}
-  XRAY_IMAGE=${XRAY_IMAGE:-ghcr.io/xtls/xray-core:26.7.28}
-  SHADOWTLS_IMAGE=${SHADOWTLS_IMAGE:-$(env_get SHADOWTLS_IMAGE)}
-  SHADOWTLS_IMAGE=${SHADOWTLS_IMAGE:-ghcr.io/ihciah/shadow-tls:v0.2.25}
-  DEBIAN_IMAGE=${DEBIAN_IMAGE:-$(env_get DEBIAN_IMAGE)}
-  DEBIAN_IMAGE=${DEBIAN_IMAGE:-debian:bookworm-slim}
-  SNELL_VERSION=${SNELL_VERSION:-$(env_get SNELL_VERSION)}
-  SNELL_VERSION=${SNELL_VERSION:-5.0.1}
+  SHADOWTLS_STRICT_ENV=""
+  SHADOWTLS_FAST_OPEN_ENV=""
+  if [[ "$SHADOWTLS_STRICT" == "true" ]]; then SHADOWTLS_STRICT_ENV=1; fi
+  if [[ "$SHADOWTLS_FAST_OPEN" == "true" ]]; then SHADOWTLS_FAST_OPEN_ENV=1; fi
 }
 
 check_dns() {
@@ -330,13 +411,13 @@ check_dns() {
 }
 
 check_tls13_target() {
-  local target=$1 label=$2 tls_output
-  tls_output=$(timeout 10 openssl s_client -connect "${target}:443" -servername "$target" -tls1_3 </dev/null 2>/dev/null || true)
+  local target=$1 label=$2 port=$3 tls_output
+  tls_output=$(timeout 10 openssl s_client -connect "${target}:${port}" -servername "$target" -tls1_3 </dev/null 2>/dev/null || true)
   if [[ "$tls_output" == *'TLSv1.3'* ]]; then
-    ok "${label} 支持 TLS 1.3：${target}"
+    ok "${label} 支持 TLS 1.3：${target}:${port}"
   else
-    warn "无法确认 ${target} 支持 TLS 1.3；${label} 可能无法正常工作。"
-    prompt_yes_no "仍使用 ${target}？" n || die "请重新运行并选择支持 TLS 1.3 的域名。"
+    warn "无法确认 ${target}:${port} 支持 TLS 1.3；${label} 可能无法正常工作。"
+    prompt_yes_no "仍使用 ${target}:${port}？" n || die "请重新运行并选择支持 TLS 1.3 的目标。"
   fi
 }
 
@@ -433,20 +514,45 @@ download_snell() {
 
 write_env() {
   {
-    printf '%s\n' 'COMPOSE_PROJECT_NAME=proxy-stack'
+    printf 'NODE_NAME=%s\n' "$NODE_NAME"
     printf 'HYSTERIA_IMAGE=%s\n' "$HYSTERIA_IMAGE"
     printf 'XRAY_IMAGE=%s\n' "$XRAY_IMAGE"
     printf 'SHADOWTLS_IMAGE=%s\n' "$SHADOWTLS_IMAGE"
     printf 'DEBIAN_IMAGE=%s\n' "$DEBIAN_IMAGE"
     printf 'SNELL_VERSION=%s\n' "$SNELL_VERSION"
+    printf 'SNELL_CLIENT_VERSION=%s\n' "$SNELL_CLIENT_VERSION"
     printf 'SERVER_ADDRESS=%s\n' "$SERVER_ADDRESS"
     printf 'HY2_DOMAIN=%s\n' "$HY2_DOMAIN"
     printf 'ACME_EMAIL=%s\n' "$ACME_EMAIL"
     printf 'HY2_PORT=%s\n' "$HY2_PORT"
     printf 'XRAY_PORT=%s\n' "$XRAY_PORT"
     printf 'SNELL_PORT=%s\n' "$SNELL_PORT"
+    printf 'HY2_MASQUERADE_URL=%s\n' "$HY2_MASQUERADE_URL"
+    printf 'HY2_OUTBOUND_MODE=%s\n' "$HY2_OUTBOUND_MODE"
+    printf 'HY2_FAST_OPEN=%s\n' "$HY2_FAST_OPEN"
+    printf 'HY2_CONGESTION=%s\n' "$HY2_CONGESTION"
+    printf 'HY2_BBR_PROFILE=%s\n' "$HY2_BBR_PROFILE"
+    printf 'HY2_SPEED_TEST=%s\n' "$HY2_SPEED_TEST"
+    printf 'HY2_UDP_IDLE_TIMEOUT=%s\n' "$HY2_UDP_IDLE_TIMEOUT"
     printf 'REALITY_SNI=%s\n' "$REALITY_SNI"
+    printf 'REALITY_TARGET_PORT=%s\n' "$REALITY_TARGET_PORT"
+    printf 'REALITY_SHOW=%s\n' "$REALITY_SHOW"
+    printf 'REALITY_MAX_TIME_DIFF=%s\n' "$REALITY_MAX_TIME_DIFF"
+    printf 'REALITY_FINGERPRINT=%s\n' "$REALITY_FINGERPRINT"
+    printf 'XRAY_DOMAIN_STRATEGY=%s\n' "$XRAY_DOMAIN_STRATEGY"
+    printf 'XRAY_LOG_LEVEL=%s\n' "$XRAY_LOG_LEVEL"
     printf 'SHADOWTLS_SNI=%s\n' "$SHADOWTLS_SNI"
+    printf 'SHADOWTLS_TARGET_PORT=%s\n' "$SHADOWTLS_TARGET_PORT"
+    printf 'SHADOWTLS_STRICT=%s\n' "$SHADOWTLS_STRICT"
+    printf 'SHADOWTLS_FAST_OPEN=%s\n' "$SHADOWTLS_FAST_OPEN"
+    printf 'SHADOWTLS_STRICT_ENV=%s\n' "$SHADOWTLS_STRICT_ENV"
+    printf 'SHADOWTLS_FAST_OPEN_ENV=%s\n' "$SHADOWTLS_FAST_OPEN_ENV"
+    printf 'SHADOWTLS_LOG_LEVEL=%s\n' "$SHADOWTLS_LOG_LEVEL"
+    printf 'SNELL_IPV6=%s\n' "$SNELL_IPV6"
+    printf 'SNELL_TFO=%s\n' "$SNELL_TFO"
+    printf 'SNELL_DNS=%s\n' "$SNELL_DNS"
+    printf 'SNELL_CLIENT_REUSE=%s\n' "$SNELL_CLIENT_REUSE"
+    printf 'SNELL_CLIENT_TFO=%s\n' "$SNELL_CLIENT_TFO"
     printf 'HY2_PASSWORD=%s\n' "$HY2_PASSWORD"
     printf 'SNELL_PSK=%s\n' "$SNELL_PSK"
     printf 'SHADOWTLS_PASSWORD=%s\n' "$SHADOWTLS_PASSWORD"
@@ -465,9 +571,12 @@ write_service_configs() {
 [snell-server]
 listen = 0.0.0.0:23413
 psk = ${SNELL_PSK}
-ipv6 = false
-tfo = true
+ipv6 = ${SNELL_IPV6}
+tfo = ${SNELL_TFO}
 EOF
+  if [[ -n "$SNELL_DNS" ]]; then
+    printf 'dns = %s\n' "$SNELL_DNS" >> "${DATA_DIR}/snell/snell-server.conf"
+  fi
 
   cat > "${DATA_DIR}/hysteria/config.yaml" <<EOF
 listen: :32123
@@ -491,28 +600,35 @@ auth:
   type: password
   password: "${HY2_PASSWORD}"
 
+speedTest: ${HY2_SPEED_TEST}
+udpIdleTimeout: ${HY2_UDP_IDLE_TIMEOUT}
+
 congestion:
-  type: bbr
-  bbrProfile: standard
+  type: ${HY2_CONGESTION}
+EOF
+  if [[ "$HY2_CONGESTION" == "bbr" ]]; then
+    printf '  bbrProfile: %s\n' "$HY2_BBR_PROFILE" >> "${DATA_DIR}/hysteria/config.yaml"
+  fi
+  cat >> "${DATA_DIR}/hysteria/config.yaml" <<EOF
 
 outbounds:
   - name: direct
     type: direct
     direct:
-      mode: 46
-      fastOpen: true
+      mode: ${HY2_OUTBOUND_MODE}
+      fastOpen: ${HY2_FAST_OPEN}
 
 masquerade:
   type: proxy
   proxy:
-    url: https://www.apple.com/
+    url: "${HY2_MASQUERADE_URL}"
     rewriteHost: true
 EOF
 
   cat > "${DATA_DIR}/xray/config.json" <<EOF
 {
   "log": {
-    "loglevel": "warning"
+    "loglevel": "${XRAY_LOG_LEVEL}"
   },
   "inbounds": [
     {
@@ -533,9 +649,10 @@ EOF
         "network": "raw",
         "security": "reality",
         "realitySettings": {
-          "show": false,
-          "target": "${REALITY_SNI}:443",
+          "show": ${REALITY_SHOW},
+          "target": "${REALITY_SNI}:${REALITY_TARGET_PORT}",
           "xver": 0,
+          "maxTimeDiff": ${REALITY_MAX_TIME_DIFF},
           "serverNames": ["${REALITY_SNI}"],
           "privateKey": "${REALITY_PRIVATE_KEY}",
           "shortIds": ["${REALITY_SHORT_ID}"]
@@ -548,7 +665,7 @@ EOF
       "tag": "direct",
       "protocol": "freedom",
       "settings": {
-        "domainStrategy": "UseIPv4v6"
+        "domainStrategy": "${XRAY_DOMAIN_STRATEGY}"
       }
     }
   ]
@@ -560,16 +677,16 @@ EOF
 write_client_config() {
   cat > "$CLIENT_FILE" <<EOF
 ================ Hysteria 2 URI ================
-hysteria2://${HY2_PASSWORD}@${HY2_DOMAIN}:${HY2_PORT}/?sni=${HY2_DOMAIN}#HY2
+hysteria2://${HY2_PASSWORD}@${HY2_DOMAIN}:${HY2_PORT}/?sni=${HY2_DOMAIN}#${NODE_NAME}-HY2
 
 ================ Surge Hysteria 2 ================
-HY2 = hysteria2, ${HY2_DOMAIN}, ${HY2_PORT}, password=${HY2_PASSWORD}, sni=${HY2_DOMAIN}
+${NODE_NAME}-HY2 = hysteria2, ${HY2_DOMAIN}, ${HY2_PORT}, password=${HY2_PASSWORD}, sni=${HY2_DOMAIN}
 
 ================ Surge Snell + ShadowTLS v3 ================
-Snell-STLS = snell, ${SERVER_ADDRESS}, ${SNELL_PORT}, psk=${SNELL_PSK}, version=5, reuse=true, tfo=true, shadow-tls-password=${SHADOWTLS_PASSWORD}, shadow-tls-sni=${SHADOWTLS_SNI}, shadow-tls-version=3
+${NODE_NAME}-Snell-STLS = snell, ${SERVER_ADDRESS}, ${SNELL_PORT}, psk=${SNELL_PSK}, version=${SNELL_CLIENT_VERSION}, reuse=${SNELL_CLIENT_REUSE}, tfo=${SNELL_CLIENT_TFO}, shadow-tls-password=${SHADOWTLS_PASSWORD}, shadow-tls-sni=${SHADOWTLS_SNI}, shadow-tls-version=3
 
 ================ VLESS Reality URI ================
-vless://${VLESS_UUID}@${SERVER_ADDRESS}:${XRAY_PORT}?type=raw&security=reality&sni=${REALITY_SNI}&pbk=${REALITY_PUBLIC_KEY}&sid=${REALITY_SHORT_ID}&fp=chrome&flow=xtls-rprx-vision#Reality
+vless://${VLESS_UUID}@${SERVER_ADDRESS}:${XRAY_PORT}?type=raw&security=reality&sni=${REALITY_SNI}&pbk=${REALITY_PUBLIC_KEY}&sid=${REALITY_SHORT_ID}&fp=${REALITY_FINGERPRINT}&flow=xtls-rprx-vision#${NODE_NAME}-Reality
 EOF
   chmod 0600 "$CLIENT_FILE"
 }
@@ -640,9 +757,9 @@ main() {
   install_docker
   collect_settings
   check_dns
-  check_tls13_target "$REALITY_SNI" "Reality 目标"
-  if [[ "$SHADOWTLS_SNI" != "$REALITY_SNI" ]]; then
-    check_tls13_target "$SHADOWTLS_SNI" "ShadowTLS 握手目标"
+  check_tls13_target "$REALITY_SNI" "Reality 目标" "$REALITY_TARGET_PORT"
+  if [[ "$SHADOWTLS_SNI:$SHADOWTLS_TARGET_PORT" != "$REALITY_SNI:$REALITY_TARGET_PORT" ]]; then
+    check_tls13_target "$SHADOWTLS_SNI" "ShadowTLS 握手目标" "$SHADOWTLS_TARGET_PORT"
   fi
   preflight_ports
 

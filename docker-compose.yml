@@ -1,3 +1,5 @@
+name: proxy-stack
+
 x-logging: &default-logging
   driver: json-file
   options:
@@ -31,12 +33,12 @@ services:
       MODE: server
       LISTEN: 0.0.0.0:32413
       SERVER: snell:23413
-      TLS: ${SHADOWTLS_SNI}:443
+      TLS: ${SHADOWTLS_SNI}:${SHADOWTLS_TARGET_PORT}
       PASSWORD: ${SHADOWTLS_PASSWORD}
       V3: "1"
-      STRICT: "1"
-      FASTOPEN: "1"
-      RUST_LOG: warn
+      STRICT: ${SHADOWTLS_STRICT_ENV:-}
+      FASTOPEN: ${SHADOWTLS_FAST_OPEN_ENV:-}
+      RUST_LOG: ${SHADOWTLS_LOG_LEVEL:-warn}
     ports:
       - ${SNELL_PORT}:32413/tcp
     cap_drop:

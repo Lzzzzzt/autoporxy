@@ -18,7 +18,7 @@ usage() {
   restart      重启全部服务
   stop         停止全部服务
   start        启动全部服务
-  update       拉取 .env 中锁定的镜像并重新部署
+  update       拉取 .env 中配置的镜像并重新部署
   check        校验 Compose 与 Xray 配置
 EOF
 }
