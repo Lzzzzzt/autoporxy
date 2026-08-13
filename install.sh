@@ -823,6 +823,7 @@ write_service_configs() {
     "${DATA_DIR}/hysteria/acme" \
     "${DATA_DIR}/reality" \
     "${DATA_DIR}/xray"
+  chmod 0700 "$DATA_DIR" "${DATA_DIR}/xray"
   install -d -m 0755 "${DATA_DIR}/reality/www"
 
   cat > "${DATA_DIR}/snell/snell-server.conf" <<EOF
@@ -1005,7 +1006,10 @@ EOF
   ]
 }
 EOF
-  chmod 0600 "${DATA_DIR}/snell/snell-server.conf" "${DATA_DIR}/hysteria/config.yaml" "${DATA_DIR}/xray/config.json"
+  chmod 0600 "${DATA_DIR}/snell/snell-server.conf" "${DATA_DIR}/hysteria/config.yaml"
+  # xray-core runs as UID 65532. The root-only parent directories protect the
+  # credentials on the host while the read-only bind mount remains readable.
+  chmod 0644 "${DATA_DIR}/xray/config.json"
   chmod 0644 "${DATA_DIR}/reality/www/index.html"
   if self_web_enabled; then
     chmod 0600 "${DATA_DIR}/reality/nginx.conf"

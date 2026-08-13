@@ -104,6 +104,14 @@ assert_contains() {
   }
 }
 
+file_mode() {
+  if stat -c '%a' "$1" >/dev/null 2>&1; then
+    stat -c '%a' "$1"
+  else
+    stat -f '%Lp' "$1"
+  fi
+}
+
 run_case() {
   local name=$1 hy2_mode=$2 reality_mode=$3 shadowtls_mode=$4 same_domain=$5 dns_server=${6:-}
   local case_dir="${TEST_ROOT}/${name}" compose_config expected_dns_services
@@ -122,6 +130,10 @@ run_case() {
   write_service_configs
   write_env
   write_client_config
+
+  [[ "$(file_mode "$DATA_DIR")" == "700" ]]
+  [[ "$(file_mode "${DATA_DIR}/xray")" == "700" ]]
+  [[ "$(file_mode "${DATA_DIR}/xray/config.json")" == "644" ]]
 
   if [[ "$HY2_MASQUERADE_MODE" == "self" ]]; then
     assert_contains "${DATA_DIR}/hysteria/config.yaml" 'type: file'
