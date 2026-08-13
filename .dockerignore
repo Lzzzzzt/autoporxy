@@ -1,0 +1,7 @@
+.git
+.github
+.env
+backups
+client-config.txt
+data
+README.md

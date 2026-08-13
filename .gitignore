@@ -1,0 +1,8 @@
+.env
+client-config.txt
+backups/
+data/
+snell/snell-server
+snell/.snell-version
+*.log
+.DS_Store

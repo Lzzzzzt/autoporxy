@@ -1,0 +1,101 @@
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: "3"
+
+services:
+  snell:
+    build:
+      context: ./snell
+      args:
+        DEBIAN_IMAGE: ${DEBIAN_IMAGE}
+    restart: unless-stopped
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - ./data/snell/snell-server.conf:/etc/snell-server.conf:ro,Z
+    logging: *default-logging
+    networks:
+      - proxy_internal
+
+  shadow-tls:
+    image: ${SHADOWTLS_IMAGE}
+    restart: unless-stopped
+    depends_on:
+      - snell
+    environment:
+      MODE: server
+      LISTEN: 0.0.0.0:32413
+      SERVER: snell:23413
+      TLS: ${SHADOWTLS_SNI}:443
+      PASSWORD: ${SHADOWTLS_PASSWORD}
+      V3: "1"
+      STRICT: "1"
+      FASTOPEN: "1"
+      RUST_LOG: warn
+    ports:
+      - ${SNELL_PORT}:32413/tcp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    ulimits:
+      memlock:
+        soft: 8388608
+        hard: 8388608
+    logging: *default-logging
+    networks:
+      - proxy_internal
+
+  hysteria:
+    image: ${HYSTERIA_IMAGE}
+    restart: unless-stopped
+    command:
+      - server
+      - -c
+      - /etc/hysteria/config.yaml
+    volumes:
+      - ./data/hysteria/config.yaml:/etc/hysteria/config.yaml:ro,Z
+      - ./data/hysteria/acme:/var/lib/hysteria/acme:Z
+    ports:
+      - ${HY2_PORT}:32123/udp
+      - 80:80/tcp
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
+    networks:
+      - proxy_internal
+
+  xray:
+    image: ${XRAY_IMAGE}
+    restart: unless-stopped
+    command:
+      - run
+      - -config
+      - /etc/xray/config.json
+    volumes:
+      - ./data/xray/config.json:/etc/xray/config.json:ro,Z
+    ports:
+      - ${XRAY_PORT}:443/tcp
+    read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
+    networks:
+      - proxy_internal
+
+networks:
+  proxy_internal:
+    driver: bridge
